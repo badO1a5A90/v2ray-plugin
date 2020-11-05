@@ -31,6 +31,7 @@ import (
 
 	"v2ray.com/core/transport/internet"
 	"v2ray.com/core/transport/internet/quic"
+	"v2ray.com/core/transport/internet/tcp"
 	"v2ray.com/core/transport/internet/tls"
 	"v2ray.com/core/transport/internet/websocket"
 
@@ -46,7 +47,7 @@ var (
 
 var (
 	vpn        = flag.Bool("V", false, "Run in VPN mode.")
-	fastOpen   = flag.Bool("fast-open", false, "Enable TCP fast open.")
+	fastOpen   = flag.Bool("fastopen", false, "Enable TCP fast open.")
 	localAddr  = flag.String("localAddr", "127.0.0.1", "local address to listen on.")
 	localPort  = flag.String("localPort", "1984", "local port to listen on.")
 	remoteAddr = flag.String("remoteAddr", "127.0.0.1", "remote address to forward.")
@@ -57,10 +58,11 @@ var (
 	cert       = flag.String("cert", "", "Path to TLS certificate file. Overrides certRaw. Default: ~/.acme.sh/{host}/fullchain.cer")
 	certRaw    = flag.String("certRaw", "", "Raw TLS certificate content. Intended only for Android.")
 	key        = flag.String("key", "", "(server) Path to TLS key file. Default: ~/.acme.sh/{host}/{host}.key")
-	mode       = flag.String("mode", "websocket", "Transport mode: websocket, quic (enforced tls).")
+	mode       = flag.String("mode", "websocket", "Transport mode: websocket, tcp, quic (enforced tls).")
 	mux        = flag.Int("mux", 1, "Concurrent multiplexed connections (websocket client mode only).")
 	server     = flag.Bool("server", false, "Run in server mode")
 	logLevel   = flag.String("loglevel", "", "loglevel for v2ray: debug, info, warning (default), error, none.")
+	logType    = flag.String("logtype", "", "logtype for v2ray: file (default), console.")
 	version    = flag.Bool("version", false, "Show current version of v2ray-plugin")
 )
 
@@ -86,11 +88,13 @@ func readCertificate() ([]byte, error) {
 	panic("thou shalt not reach hear")
 }
 
-func logConfig(logLevel string) *vlog.Config {
+func logConfig(logLevel string, logType string) *vlog.Config {
 	config := &vlog.Config{
 		ErrorLogLevel: clog.Severity_Warning,
-		ErrorLogType:  vlog.LogType_Console,
-		AccessLogType: vlog.LogType_Console,
+		ErrorLogType:  vlog.LogType_File,
+		AccessLogType: vlog.LogType_File,
+		ErrorLogPath:  "v2ray-plugin.error.log",
+		AccessLogPath: "v2ray-plugin.access.log",
 	}
 	level := strings.ToLower(logLevel)
 	switch level {
@@ -104,6 +108,13 @@ func logConfig(logLevel string) *vlog.Config {
 		config.ErrorLogType = vlog.LogType_None
 		config.AccessLogType = vlog.LogType_None
 	}
+	logtype := strings.ToLower(logType)
+	switch logtype {
+	case "console":
+		config.ErrorLogType = vlog.LogType_Console
+		config.AccessLogType = vlog.LogType_Console
+	}
+
 	return config
 }
 
@@ -147,6 +158,8 @@ func generateConfig() (*core.Config, error) {
 			Security: &protocol.SecurityConfig{Type: protocol.SecurityType_NONE},
 		}
 		*tlsEnabled = true
+	case "tcp":
+		transportSettings = &tcp.Config{}
 	default:
 		return nil, newError("unsupported mode:", *mode)
 	}
@@ -198,7 +211,7 @@ func generateConfig() (*core.Config, error) {
 		serial.ToTypedMessage(&dispatcher.Config{}),
 		serial.ToTypedMessage(&proxyman.InboundConfig{}),
 		serial.ToTypedMessage(&proxyman.OutboundConfig{}),
-		serial.ToTypedMessage(logConfig(*logLevel)),
+		serial.ToTypedMessage(logConfig(*logLevel, *logType)),
 	}
 
 	if *server {
@@ -232,29 +245,28 @@ func generateConfig() (*core.Config, error) {
 			}},
 			App: apps,
 		}, nil
-	} else {
-		senderConfig := proxyman.SenderConfig{StreamSettings: &streamConfig}
-		if connectionReuse {
-			senderConfig.MultiplexSettings = &proxyman.MultiplexingConfig{Enabled: true, Concurrency: uint32(*mux)}
-		}
-		return &core.Config{
-			Inbound: []*core.InboundHandlerConfig{{
-				ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
-					PortRange: net.SinglePortRange(lport),
-					Listen:    net.NewIPOrDomain(net.ParseAddress(*localAddr)),
-				}),
-				ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
-					Address:  net.NewIPOrDomain(net.LocalHostIP),
-					Networks: []net.Network{net.Network_TCP},
-				}),
-			}},
-			Outbound: []*core.OutboundHandlerConfig{{
-				SenderSettings: serial.ToTypedMessage(&senderConfig),
-				ProxySettings:  outboundProxy,
-			}},
-			App: apps,
-		}, nil
 	}
+	senderConfig := proxyman.SenderConfig{StreamSettings: &streamConfig}
+	if connectionReuse {
+		senderConfig.MultiplexSettings = &proxyman.MultiplexingConfig{Enabled: true, Concurrency: uint32(*mux)}
+	}
+	return &core.Config{
+		Inbound: []*core.InboundHandlerConfig{{
+			ReceiverSettings: serial.ToTypedMessage(&proxyman.ReceiverConfig{
+				PortRange: net.SinglePortRange(lport),
+				Listen:    net.NewIPOrDomain(net.ParseAddress(*localAddr)),
+			}),
+			ProxySettings: serial.ToTypedMessage(&dokodemo.Config{
+				Address:  net.NewIPOrDomain(net.LocalHostIP),
+				Networks: []net.Network{net.Network_TCP},
+			}),
+		}},
+		Outbound: []*core.OutboundHandlerConfig{{
+			SenderSettings: serial.ToTypedMessage(&senderConfig),
+			ProxySettings:  outboundProxy,
+		}},
+		App: apps,
+	}, nil
 }
 
 func startV2Ray() (core.Server, error) {
@@ -292,6 +304,9 @@ func startV2Ray() (core.Server, error) {
 		}
 		if c, b := opts.Get("loglevel"); b {
 			*logLevel = c
+		}
+		if c, b := opts.Get("logtype"); b {
+			*logType = c
 		}
 		if _, b := opts.Get("server"); b {
 			*server = true
